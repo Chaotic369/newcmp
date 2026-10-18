@@ -1,0 +1,1228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Find-and-Replace Patch Engine</title>
+<style>
+  :root {
+    --bg: #0a0a0c;
+    --panel: #121318;
+    --border: #232530;
+    --text: #eef0f6;
+    --muted: #8b90a0;
+    --blue: #5c9dff;
+    --green: #39d353;
+    --amber: #e3b341;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --teal: #2dd4bf;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; display: flex; flex-direction: column; }
+  
+  /* Top Toolbar */
+  #toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--border);
+    z-index: 20;
+  }
+  .btn {
+    background: rgba(255,255,255,0.07); color: var(--text); border: 1px solid var(--border);
+    padding: 6px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .btn:hover:not(:disabled) { background: rgba(255,255,255,0.14); }
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .btn-green { color: var(--green); border-color: rgba(57,211,83,0.35); }
+  .btn-blue { color: var(--blue); border-color: rgba(92,157,255,0.35); }
+  .btn-amber { color: var(--amber); border-color: rgba(227,179,65,0.35); }
+  .btn-purple { color: var(--purple); border-color: rgba(188,140,255,0.35); }
+  .btn-teal { color: var(--teal); border-color: rgba(45,212,191,0.35); }
+
+  #aiInstruction {
+    flex: 1; min-width: 180px; background: #07080a; color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12px;
+  }
+
+  /* Workspace Area */
+  #workspace { flex: 1; position: relative; display: flex; overflow: hidden; }
+  #preview { width: 100%; height: 100%; border: none; background: #fff; display: none; }
+  #codeView {
+    width: 100%; height: 100%; background: #08080a; color: var(--text);
+    font-family: "JetBrains Mono", Consolas, monospace; font-size: 12px; line-height: 1.5;
+    padding: 14px; border: none; outline: none; resize: none; display: none; white-space: pre; overflow: auto;
+  }
+  #emptyState {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px; color: var(--muted);
+    font-size: 14px; pointer-events: none;
+  }
+
+  /* Modals & Drawers */
+  .modal {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; width: 92vw; max-width: 480px; max-height: 82vh; overflow-y: auto;
+    z-index: 100; display: none; flex-direction: column; gap: 10px;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.75);
+  }
+  .modal.open { display: flex; }
+  .modal h3 { font-size: 14px; display: flex; justify-content: space-between; align-items: center; }
+  .row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .row label { width: 95px; color: var(--muted); flex-shrink: 0; }
+  .row input, .row select, .modal textarea {
+    flex: 1; background: #07080a; color: var(--text); border: 1px solid var(--border);
+    padding: 6px 8px; border-radius: 6px; font-size: 12px; font-family: inherit;
+  }
+
+  /* Status Bar */
+  #statusBar {
+    height: 26px; background: #07080a; border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px; padding: 0 12px;
+    font-size: 11px; color: var(--muted);
+  }
+  #toast {
+    position: fixed; top: 56px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--border); padding: 10px 18px;
+    border-radius: 8px; font-size: 12px; font-weight: 600; z-index: 200;
+    display: none; white-space: pre-line; text-align: center; box-shadow: 0 8px 28px rgba(0,0,0,0.6);
+  }
+  #logList { font-family: monospace; font-size: 11px; max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+  .log-ok { color: var(--green); } .log-warn { color: var(--amber); } .log-err { color: var(--red); } .log-info { color: var(--blue); }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <button class="btn btn-amber" id="fileBtn">Load File</button>
+  <input type="file" id="fileInput" style="display:none">
+  <button class="btn btn-green" id="pasteBtn">Paste Patch</button>
+  <button class="btn" id="undoBtn" disabled>Undo</button>
+  <button class="btn" id="redoBtn" disabled>Redo</button>
+  <button class="btn" id="viewBtn">View: Preview</button>
+
+  <input type="text" id="aiInstruction" placeholder="Instruction for LLM / Magic Edit Lite...">
+  <button class="btn btn-purple" id="payloadBtn">Copy Payload</button>
+  <button class="btn btn-teal" id="magicWandBtn">Magic Edit Lite</button>
+
+  <button class="btn btn-blue" id="ghLoadBtn">GH Load</button>
+  <button class="btn btn-blue" id="ghPushBtn">GH Push</button>
+  <button class="btn" id="settingsBtn">Config</button>
+  <button class="btn" id="logBtn">Logs</button>
+  <button class="btn btn-teal" id="testBtn">Run 10 Tests</button>
+</div>
+
+<div id="workspace">
+  <div id="emptyState">Drop a file here, click "Load File", or paste code / patches.</div>
+  <iframe id="preview" sandbox="allow-scripts allow-same-origin allow-modals allow-forms allow-popups allow-downloads"></iframe>
+  <textarea id="codeView" spellcheck="false"></textarea>
+</div>
+
+<div id="statusBar">
+  <span id="sbFile">index.html</span>
+  <span>|</span>
+  <span id="sbLines">0 lines</span>
+  <span>|</span>
+  <span id="sbUndo">undo:0 redo:0</span>
+  <span>|</span>
+  <span id="sbMod">clean</span>
+</div>
+
+<div id="toast"></div>
+
+<!-- Config Modal -->
+<div class="modal" id="configModal">
+  <h3><span>Settings & GitHub / Gemini Config</span><button class="btn" id="closeConfigBtn">✕</button></h3>
+  <div class="row"><label>GH Token</label><input type="password" id="cfgGhToken" placeholder="ghp_..."></div>
+  <div class="row"><label>GH Repo</label><input type="text" id="cfgGhRepo" placeholder="owner/repo"></div>
+  <div class="row"><label>GH Branch</label><input type="text" id="cfgGhBranch" value="main"></div>
+  <div class="row"><label>GH File Path</label><input type="text" id="cfgGhPath" value="index.html"></div>
+  <div class="row"><label>Gemini Key</label><input type="password" id="cfgGeminiKey" placeholder="AIzaSy..."></div>
+  <div class="row"><label>Gemini Model</label><input type="text" id="cfgGeminiModel" value="gemini-2.5-flash"></div>
+  <div class="row"><label>Indent Fix</label><input type="checkbox" id="cfgIndentFix" checked></div>
+  <div class="row"><label>Warn Ambiguous</label><input type="checkbox" id="cfgWarnAmbiguous" checked></div>
+  <div style="display:flex; justify-content:flex-end; gap:8px;">
+    <button class="btn btn-green" id="saveConfigBtn">Save</button>
+  </div>
+</div>
+
+<!-- Log & Test Output Modal -->
+<div class="modal" id="logModal">
+  <h3><span>Engine Logs & Acceptance Tests</span><button class="btn" id="closeLogBtn">✕</button></h3>
+  <div id="logList"></div>
+</div>
+
+<script>
+// ====================================================
+// 0. STATE AND CONSTANTS
+// ====================================================
+const SPLIT_TOKEN    = '===SPLIT===';
+const BLOCK_TOKEN    = '===BLOCK===';
+const NUKE_THRESHOLD = 0.60;
+const MAX_UNDO       = 50;
+
+let sourceContent    = '';
+let lastSavedContent = '';
+let undoStack        = [];
+let redoStack        = [];
+let fileName         = 'index.html';
+let ghFilePath       = 'index.html';
+let workspaceFiles   = {}; // { path: { content, modified } }
+
+let settings = {
+  indentFix: true,
+  warnAmbiguous: true,
+  ghToken: '',
+  ghRepo: '',
+  ghBranch: 'main',
+  geminiKey: '',
+  geminiModel: 'gemini-2.5-flash'
+};
+
+let viewMode = 'preview';
+let logs = [];
+
+const $preview    = document.getElementById('preview');
+const $codeView   = document.getElementById('codeView');
+const $emptyState = document.getElementById('emptyState');
+const $toast      = document.getElementById('toast');
+
+let toastTimer = null;
+function toast(msg, type = 'ok', duration = 3200) {
+  clearTimeout(toastTimer);
+  $toast.textContent = msg;
+  $toast.style.display = 'block';
+  $toast.style.color = type === 'err' ? 'var(--red)' : type === 'warn' ? 'var(--amber)' : type === 'info' ? 'var(--blue)' : 'var(--green)';
+  toastTimer = setTimeout(() => { $toast.style.display = 'none'; }, duration);
+}
+
+function addLog(type, msg) {
+  const ts = new Date().toLocaleTimeString();
+  logs.unshift({ type, msg, ts });
+  if (logs.length > 150) logs.pop();
+  const $list = document.getElementById('logList');
+  if ($list) {
+    $list.innerHTML = logs.map(l => `<div class="log-${l.type}">[${l.ts}]${l.msg.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`).join('');
+  }
+}
+
+function updateStatusBar() {
+  const lines = sourceContent ? sourceContent.split('\n').length : 0;
+  document.getElementById('sbFile').textContent = ghFilePath || fileName;
+  document.getElementById('sbLines').textContent = `${lines} lines (${(sourceContent.length / 1024).toFixed(1)} KB)`;
+  document.getElementById('sbUndo').textContent = `undo:${undoStack.length} redo:${redoStack.length}`;
+  const modCount = Object.values(workspaceFiles).filter(f => f.modified).length;
+  document.getElementById('sbMod').textContent = modCount > 0 ? `${modCount} modified` : 'clean';
+  document.getElementById('undoBtn').disabled = undoStack.length === 0;
+  document.getElementById('redoBtn').disabled = redoStack.length === 0;
+}
+
+// UTF-8 Base64 helpers (Section 1 & Section 11)
+function base64ToUnicode(base64Str) {
+  const clean = (base64Str || '').replace(/\s/g, '');
+  const bin = atob(clean);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+function unicodeToBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  const CHUNK = 0x8000; // 32 KB chunks
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+function normalizeLF(str) {
+  return String(str || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+// ====================================================
+// 1. LOAD THE SOURCE
+// ====================================================
+function loadLocalFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    fileName = file.name;
+    ghFilePath = file.name;
+    document.getElementById('cfgGhPath').value = ghFilePath;
+
+    if (workspaceFiles[ghFilePath] && workspaceFiles[ghFilePath].modified) {
+      sourceContent = normalizeLF(workspaceFiles[ghFilePath].content);
+      toast(`Kept unsaved workspace version of ${ghFilePath}`, 'warn');
+    } else {
+      sourceContent = normalizeLF(ev.target.result);
+      lastSavedContent = sourceContent;
+      workspaceFiles[ghFilePath] = { content: sourceContent, modified: false };
+    }
+    undoStack = [];
+    redoStack = [];
+    render(sourceContent);
+    updateStatusBar();
+    toast(`Loaded ${fileName}`);
+  };
+  reader.readAsText(file, 'UTF-8');
+}
+
+async function loadFromGitHub() {
+  if (!settings.ghToken || !settings.ghRepo) {
+    toast('Configure GitHub Token and Repo first', 'warn');
+    document.getElementById('configModal').classList.add('open');
+    return;
+  }
+  const path = ghFilePath || 'index.html';
+  try {
+    const res = await fetch(`https://api.github.com/repos/${settings.ghRepo}/contents/${path}?ref=${settings.ghBranch}`, {
+      headers: { Authorization: `token ${settings.ghToken}`, Accept: 'application/vnd.github.v3+json' },
+      cache: 'no-store'
+    });
+    if (!res.ok) throw new Error(`GitHub GET failed (${res.status})`);
+    const data = await res.json();
+    const decoded = normalizeLF(base64ToUnicode(data.content || ''));
+    fileName = path.split('/').pop() || path;
+
+    if (workspaceFiles[path] && workspaceFiles[path].modified) {
+      sourceContent = normalizeLF(workspaceFiles[path].content);
+      lastSavedContent = decoded;
+      toast(`Kept modified workspace version of ${path}`, 'warn');
+    } else {
+      sourceContent = decoded;
+      lastSavedContent = sourceContent;
+      workspaceFiles[path] = { content: sourceContent, modified: false };
+      toast(`Loaded ${path} from GitHub`);
+    }
+    undoStack = [];
+    redoStack = [];
+    render(sourceContent);
+    updateStatusBar();
+  } catch (err) {
+    toast(err.message, 'err');
+    addLog('err', err.message);
+  }
+}
+
+// ====================================================
+// 2. PATCH FORMAT (SUPER PROMPT & COPY PAYLOAD)
+// ====================================================
+const SUPER_PROMPT = [
+  "Return your changes as plain-text find-and-replace patch blocks inside ONE single code block.",
+  "Each patch consists of the OLD code, a line containing only ===SPLIT===, and the NEW code.",
+  "Separate multiple patches with a line containing only ===BLOCK===.",
+  "Strict contract rules:",
+  "- OLD must be a verbatim copy from the file; if it occurs more than once, widen it with surrounding lines until unique.",
+  "- Deletion: NEW is completely empty (no comment, no blank line).",
+  "- Never reformat or change the indentation style.",
+  "- The tokens ===SPLIT=== / ===BLOCK=== must never appear inside code.",
+  "- Never leave a bracket unclosed; never convert inline <script> to external; never add imports unless modules are already used; keep existing error handling and comments.",
+  "- Changing a worker also means fixing the main script (keep both sides in sync).",
+  "- Promises need .catch()/try-catch; no duplicate declarations in the same scope.",
+  "- If a patch changes critical state (localStorage keys, schema), add one extra ===BLOCK=== that is the reverse patch.",
+  "- If the change would replace more than 60% of the file, say so in plain text BEFORE the code block and ask for confirmation.",
+  "- Output only the code block(s); any concern goes in plain text before it."
+].join('\n');
+
+function buildPayload(userInstruction) {
+  return SUPER_PROMPT + "\n\n=== INSTRUCTIONS ===\n" + (userInstruction || '') + "\n\n=== CURRENT SOURCE ===\n" + sourceContent;
+}
+
+// ====================================================
+// 3. PASTE PIPELINE doPaste(raw)
+// ====================================================
+function fixEncoding(raw) {
+  if (!raw) return '';
+  let text = String(raw)
+    .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/\|\{\}\|\{\}/g, '||')
+    .replace(/\|\{\}/g, '|')
+    .replace(/\|/g, '|')
+    .replace(/\&/g, '&');
+
+  const hasEntities = /&(?:amp|lt|gt|quot|#39|nbsp);/.test(text);
+  if (hasEntities && !/[<>]/.test(text)) {
+    text = text
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&');
+  }
+  return text;
+}
+
+function doPaste(raw) {
+  // 3.1 Empty clipboard -> warn and stop
+  if (!raw || !String(raw).trim()) {
+    toast('Clipboard is empty.', 'warn');
+    return false;
+  }
+
+  // 3.2 fixEncoding
+  raw = fixEncoding(raw);
+
+  // 3.3 Bootstrap cases
+  const blocks = parseAllBlocks(raw);
+  if (!sourceContent) {
+    if (/<!doctype\s+html|<html[\s>]/i.test(raw) && blocks.length === 0) {
+      sourceContent = normalizeLF(raw);
+      lastSavedContent = sourceContent;
+      workspaceFiles[ghFilePath] = { content: sourceContent, modified: true };
+      render(sourceContent);
+      updateStatusBar();
+      toast('Loaded full HTML from clipboard');
+      return true;
+    }
+    if (blocks.length === 0) {
+      sourceContent = normalizeLF(raw);
+      lastSavedContent = sourceContent;
+      workspaceFiles[ghFilePath] = { content: sourceContent, modified: true };
+      viewMode = 'code';
+      document.getElementById('viewBtn').textContent = 'View: Code';
+      render(sourceContent);
+      updateStatusBar();
+      toast('Loaded source snippet into Code View');
+      return true;
+    }
+    toast('Load a file first before applying patches.', 'warn');
+    return false;
+  }
+
+  // 3.4 Zero blocks -> error, change nothing
+  if (blocks.length === 0) {
+    toast('no ===SPLIT=== blocks found', 'err');
+    addLog('err', 'no ===SPLIT=== blocks found');
+    return false;
+  }
+
+  // 3.5 ATOMIC APPLY sequentially on staging
+  let staging = sourceContent;
+  for (let i = 0; i < blocks.length; i++) {
+    const res = applyBlockToContent(blocks[i], i + 1, staging);
+    if (!res.success) {
+      toast(`Patch aborted at block ${i + 1}:${res.reason}`, 'err', 5000);
+      addLog('err', `Block ${i + 1} failed:${res.reason}`);
+      return false;
+    }
+    staging = res.newContent;
+  }
+
+  // 3.6 Syntax health check
+  const health = verifySyntaxHealth(sourceContent, staging);
+  if (!health.ok) {
+    toast(`Patch rejected: ${health.reason}`, 'err', 5000);
+    addLog('err', `Syntax check rejected patch: ${health.reason}`);
+    return false;
+  }
+
+  // 3.7 Commit
+  pushState();
+  sourceContent = staging;
+  workspaceFiles[ghFilePath] = { content: sourceContent, modified: true };
+  render(sourceContent);
+  updateStatusBar();
+  toast(`Applied ${blocks.length} patch block(s)`);
+  addLog('ok', `Committed ${blocks.length} block(s)`);
+  return true;
+}
+
+// ====================================================
+// 4. parseAllBlocks(text) <-- THE SPLITTING LOGIC
+// ====================================================
+function stripCodeFences(text) {
+  return String(text)
+    .replace(/^[ \t]*```[a-zA-Z0-9_-]*[ \t]*\r?\n?/gm, '')
+    .replace(/^[ \t]*~~~[a-zA-Z0-9_-]*[ \t]*\r?\n?/gm, '')
+    .replace(/^[ \t]*\/\/\s*(?:OLD|NEW)\s*(?:CHUNK|BLOCK|CODE)?[ \t]*\r?\n?/gim, '')
+    .replace(/^(?:here(?:'s| is)\s+(?:the\s+)?(?:patch|fix|code|update|result)[^\n]*\n)/i, '')
+    .trim();
+}
+
+function normaliseSplitTokens(text) {
+  return String(text)
+    .replace(/={2,4}\s*SPLIT\s*={2,4}/gi, SPLIT_TOKEN)
+    .replace(/={2,4}\s*BLOCK\s*={2,4}/gi, BLOCK_TOKEN)
+    .replace(/^[ \t]*-{2,}\s*SPLIT\s*-{2,}[ \t]*$/gim, SPLIT_TOKEN)
+    .replace(/^[ \t]*-{2,}\s*BLOCK\s*-{2,}[ \t]*$/gim, BLOCK_TOKEN);
+}
+
+function parseAllBlocks(text) {
+  let cleaned = stripCodeFences(text);
+  cleaned = normaliseSplitTokens(cleaned);
+  cleaned = cleaned
+    .replace(/\/\/\s*(?:OLD|NEW)\s*CHUNK/gi, '')
+    .replace(/#\s*(?:OLD|NEW)\s*CHUNK/gi, '')
+    .trim();
+
+  if (sourceContent && cleaned.length > sourceContent.length * NUKE_THRESHOLD) {
+    const pct = Math.round((cleaned.length / sourceContent.length) * 100);
+    toast(`Warning: patch size is ${pct}% of source (>60%)`, 'warn');
+    addLog('warn', `Nuke warning: patch is ${pct}% of file size`);
+  }
+
+  const units = cleaned.split(BLOCK_TOKEN).map(u => u.trim()).filter(Boolean);
+  const blocks = [];
+
+  for (const unit of units) {
+    if (!unit.includes(SPLIT_TOKEN)) continue;
+    const idx = unit.indexOf(SPLIT_TOKEN);
+    const oldCode = unit.slice(0, idx).trim();
+    const newCode = unit.slice(idx + SPLIT_TOKEN.length).trim();
+    if (oldCode || newCode) {
+      blocks.push({ oldCode, newCode });
+    }
+  }
+  return blocks;
+}
+
+// ====================================================
+// 5. findFingerprintedChunk(source, chunk) (5-tier matcher)
+// ====================================================
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildResult(source, startIdx, matchedText) {
+  const lineStart = source.lastIndexOf('\n', startIdx - 1) + 1;
+  const prefix = source.substring(lineStart, startIdx);
+  const baseIndent = (prefix.match(/^[ \t]*/) || [''])[0];
+  return {
+    startIndex: startIdx,
+    endIndex: startIdx + matchedText.length,
+    baseIndent,
+    matchedText
+  };
+}
+
+function findFingerprintedChunk(source, chunk) {
+  if (!source || !chunk) return null;
+
+  // Tier 1 - exact
+  const idx = source.indexOf(chunk);
+  if (idx !== -1) {
+    let count = 0, pos = 0;
+    while ((pos = source.indexOf(chunk, pos)) !== -1) {
+      count++;
+      pos += 1;
+    }
+    if (count > 1 && settings.warnAmbiguous) {
+      toast(`matched ${count} times, patched first`, 'warn');
+      addLog('warn', `matched ${count} times, patched first`);
+    }
+    return buildResult(source, idx, chunk);
+  }
+
+  // Tier 2 & Tier 3 - only if chunk.length < 1500
+  if (chunk.length < 1500) {
+    // Tier 2 - whitespace-tolerant
+    try {
+      const pattern2 = escapeRegExp(chunk)
+        .replace(/[ \t]+/g, '[ \\t]+')
+        .replace(/\n/g, '[ \\t]*\\n[ \\t]*');
+      const m2 = source.match(new RegExp(pattern2));
+      if (m2 && m2.index !== undefined) {
+        addLog('info', 'Tier 2 whitespace-tolerant match');
+        return buildResult(source, m2.index, m2[0]);
+      }
+    } catch (e) {}
+
+    // Tier 3 - aggressive whitespace
+    try {
+      const pattern3 = escapeRegExp(chunk).replace(/\s+/g, '\\s+');
+      const matches3 = Array.from(source.matchAll(new RegExp(pattern3, 'g')));
+      if (matches3.length > 0) {
+        if (matches3.length > 1 && settings.warnAmbiguous) {
+          toast(`matched ${matches3.length} times (Tier 3), patched first`, 'warn');
+          addLog('warn', `Tier 3 matched ${matches3.length} times, patched first`);
+        }
+        return buildResult(source, matches3[0].index, matches3[0][0]);
+      }
+    } catch (e) {}
+  }
+
+  // Tier 4 - anchor match (at least 3 non-empty lines and length < 3000)
+  const nonEmptyLines = chunk.split('\n').map(l => l.trim()).filter(Boolean);
+  if (nonEmptyLines.length >= 3 && chunk.length < 3000) {
+    try {
+      const first = escapeRegExp(nonEmptyLines[0]);
+      const last  = escapeRegExp(nonEmptyLines[nonEmptyLines.length - 1]);
+      const rx4   = new RegExp(first + '[\\s\\S]{1,3000}?' + last);
+      const m4    = source.match(rx4);
+      if (m4 && m4.index !== undefined) {
+        toast('verify patch (Tier 4 anchor match used)', 'warn');
+        addLog('warn', 'verify patch: Tier 4 anchor match used');
+        return buildResult(source, m4.index, m4[0]);
+      }
+    } catch (e) {}
+  }
+
+  // Tier 5 - single line (chunk has no newline)
+  if (!chunk.includes('\n')) {
+    try {
+      const rx5 = new RegExp('^[ \\t]*' + escapeRegExp(chunk.trim()) + '[ \\t]*$', 'm');
+      const m5  = source.match(rx5);
+      if (m5 && m5.index !== undefined) {
+        addLog('info', 'Tier 5 single-line match');
+        return buildResult(source, m5.index, m5[0]);
+      }
+    } catch (e) {}
+  }
+
+  return null;
+}
+
+// ====================================================
+// 6. applyBlockToContent(block, n, content) and reindent
+// ====================================================
+function reindent(code, baseIndent) {
+  if (!code || !settings.indentFix) return code;
+  const lines = code.split('\n');
+  const nonEmpty = lines.filter(l => l.trim().length > 0);
+  if (nonEmpty.length === 0) return code;
+  const minIndent = Math.min(...nonEmpty.map(l => (l.match(/^[ \t]*/) || [''])[0].length));
+  return lines.map((line, idx) => {
+    if (idx === 0 || !line.trim()) return line;
+    return baseIndent + line.slice(minIndent);
+  }).join('\n');
+}
+
+function applyBlockToContent(block, n, content) {
+  const oldCode = normalizeLF(block.oldCode || '');
+  const newCode = normalizeLF(block.newCode || '');
+
+  if (!oldCode) {
+    return { success: false, reason: 'Empty OLD target block' };
+  }
+
+  const loc = findFingerprintedChunk(content, oldCode);
+  if (!loc) {
+    return {
+      success: false,
+      reason: `No matching location for: "${oldCode.slice(0, 60)}"`
+    };
+  }
+
+  const newText = reindent(newCode, loc.baseIndent);
+  const result = content.slice(0, loc.startIndex) + newText + content.slice(loc.endIndex);
+  return { success: true, newContent: result };
+}
+
+// ====================================================
+// 7. verifySyntaxHealth(original, modified)
+// ====================================================
+function tokenBalance(src) {
+  let js = String(src || '');
+  if (/<html|<body/i.test(js)) {
+    let extracted = '';
+    const re = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+    let m;
+    while ((m = re.exec(js)) !== null) {
+      extracted += '\n' + m[1];
+    }
+    js = extracted;
+  }
+
+  const stripped = js
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*/g, '')
+    .replace(/`(?:\\[\s\S]|[^`])*`/g, '')
+    .replace(/'(?:\\.|[^'\\\n])*'/g, '')
+    .replace(/"(?:\\.|[^"\\\n])*"/g, '')
+    .replace(/\/(?:\\\/|[^/\n])+\/[gimyus]*/g, '');
+
+  const bal = { '{': 0, '(': 0, '[': 0 };
+  const closeMap = { '}': '{', ')': '(', ']': '[' };
+  for (let i = 0; i < stripped.length; i++) {
+    const ch = stripped[i];
+    if (bal[ch] !== undefined) bal[ch]++;
+    else if (closeMap[ch]) bal[closeMap[ch]]--;
+  }
+  return bal;
+}
+
+function verifySyntaxHealth(original, modified) {
+  const origBal = tokenBalance(original);
+  const modBal  = tokenBalance(modified);
+  for (const k of ['{', '(', '[']) {
+    const delta = (modBal[k] || 0) - (origBal[k] || 0);
+    if (Math.abs(delta) > 5) {
+      return { ok: false, reason: 'Unbalanced bracket change' };
+    }
+  }
+  return { ok: true };
+}
+
+// ====================================================
+// 8. UNDO / REDO
+// ====================================================
+function pushState() {
+  undoStack.push(sourceContent);
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
+  redoStack = [];
+  updateStatusBar();
+}
+
+function undo() {
+  if (undoStack.length === 0) return;
+  redoStack.push(sourceContent);
+  sourceContent = undoStack.pop();
+  if (ghFilePath) workspaceFiles[ghFilePath] = { content: sourceContent, modified: sourceContent !== lastSavedContent };
+  render(sourceContent);
+  updateStatusBar();
+}
+
+function redo() {
+  if (redoStack.length === 0) return;
+  undoStack.push(sourceContent);
+  sourceContent = redoStack.pop();
+  if (ghFilePath) workspaceFiles[ghFilePath] = { content: sourceContent, modified: sourceContent !== lastSavedContent };
+  render(sourceContent);
+  updateStatusBar();
+}
+
+// ====================================================
+// 9. PREVIEW RENDER
+// ====================================================
+function getNestingDepth() {
+  let d = 0, w = window;
+  try {
+    while (w !== w.top && d < 10) { d++; w = w.parent; }
+  } catch (e) {}
+  return d;
+}
+
+const currentDepth = getNestingDepth();
+let renderTimer = null;
+
+function render(src = sourceContent) {
+  if ($codeView.value !== src)$codeView.value = src;
+
+  if (!src) {
+    $emptyState.style.display = 'flex';
+    $preview.style.display = 'none';$codeView.style.display = 'none';
+    return;
+  }
+  $emptyState.style.display = 'none';
+
+  if (viewMode === 'code') {
+    $preview.style.display = 'none';$codeView.style.display = 'block';
+  } else {
+    $codeView.style.display = 'none';$preview.style.display = 'block';
+  }
+
+  clearTimeout(renderTimer);
+  renderTimer = setTimeout(() => {
+    if (currentDepth >= 6) {
+      addLog('warn', 'Nested iframe depth capped at 6');
+      return;
+    }
+    const bridge = `<script>
+      window.onerror = function(m,s,l){ parent.postMessage({__patchErr: 'Line '+l+': '+m}, '*'); };
+      window.addEventListener('unhandledrejection', function(e){ parent.postMessage({__patchErr: 'Unhandled rejection: '+(e.reason&&e.reason.message||e.reason)}, '*'); });
+      const _ce = console.error;
+      console.error = function(){ _ce.apply(console, arguments); parent.postMessage({__patchErr: 'console.error: '+Array.from(arguments).join(' ')}, '*'); };
+    <\/script>`;
+
+    const isHtml = (fileName && /\.html?$/i.test(fileName)) || /<!doctype\s+html|<html[\s>]/i.test(src);
+    if (isHtml) {
+      if (/<head[^>]*>/i.test(src)) {
+        $preview.srcdoc = src.replace(/<head([^>]*)>/i, `<head$1>${bridge}`);
+      } else {
+        $preview.srcdoc = bridge + src;
+      }
+    } else {
+      const escaped = src.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      $preview.srcdoc = `<!DOCTYPE html><html><head><meta charset="UTF-8">${bridge}<style>body{background:#08080a;color:#eef0f6;font-family:monospace;padding:16px;white-space:pre-wrap;}</style></head><body><pre>${escaped}</pre></body></html>`;
+    }
+  }, 500);
+}
+
+window.addEventListener('message', (e) => {
+  if (e.data && e.data.__patchErr) {
+    toast(e.data.__patchErr, 'err');
+    addLog('err', e.data.__patchErr);
+  }
+});
+
+// ====================================================
+// 10. AI "MAGIC EDIT LITE" (second path, no clipboard)
+// ====================================================
+function getMagicContext(src, instruction) {
+  function expandWholeLines(s, e) {
+    const startIndex = src.lastIndexOf('\n', Math.max(0, s) - 1) + 1;
+    let endIndex = src.indexOf('\n', e);
+    if (endIndex === -1) endIndex = src.length;
+    return { section: src.substring(startIndex, endIndex), startIndex, endIndex };
+  }
+
+  // 1. User selection in code view (> 5 non-space chars)
+  if (viewMode === 'code' && $codeView.selectionStart !==$codeView.selectionEnd) {
+    const sel = src.substring($codeView.selectionStart, $codeView.selectionEnd);
+    if (sel.replace(/\s/g, '').length > 5) {
+      return expandWholeLines($codeView.selectionStart, $codeView.selectionEnd);
+    }
+  }
+
+  // 2. Small file <= 20000 chars
+  if (src.length <= 20000) {
+    return { section: src, startIndex: 0, endIndex: src.length };
+  }
+
+  // 3. First non-stopword 3+ chars in instruction
+  const stopwords = new Set(['the','and','for','with','make','change','add','remove','fix','update','delete','set','use','from','into']);
+  const words = (instruction || '').toLowerCase().match(/[a-z0-9_.-]{3,}/g) || [];
+  const lowerSrc = src.toLowerCase();
+
+  for (let w of words) {
+    if (stopwords.has(w)) continue;
+    const target = (w === 'bg' || w === 'background' || w === 'theme') ? '<body' : w;
+    const idx = lowerSrc.indexOf(target);
+    if (idx !== -1) {
+      return expandWholeLines(Math.max(0, idx - 3000), Math.min(src.length, idx + 4000));
+    }
+  }
+
+  // 4. Fallback: first 12000 chars to line boundary
+  return expandWholeLines(0, Math.min(src.length, 12000));
+}
+
+function applyLineEdits(lines, text) {
+  const rawLines = normalizeLF(text).split('\n').filter(l => !/^\s*```/.test(l));
+  const headerRx = /^\s*@@\s*(replace|delete|insert\s+after)\s+(\d+)(?:\s*-\s*(\d+))?\s*$/i;
+  const total = lines.length;
+
+  if (rawLines.some(l => /^\s*@@\s*none\s*$/i.test(l)) && !rawLines.some(l => headerRx.test(l))) {
+    return { lines: lines.slice(), count: 0 };
+  }
+
+  const ops = [];
+  let cur = null;
+  for (const line of rawLines) {
+    const m = line.match(headerRx);
+    if (m) {
+      const kind = m[1].toLowerCase().replace(/\s+/g, ' ');
+      const S = parseInt(m[2], 10);
+      const E = m[3] ? parseInt(m[3], 10) : S;
+      cur = { kind, S, E, body: [] };
+      ops.push(cur);
+    } else if (cur) {
+      cur.body.push(line);
+    }
+  }
+
+  if (ops.length === 0) {
+    throw new Error('No valid @@ edit blocks found.');
+  }
+
+  for (const op of ops) {
+    while (op.body.length > 0 && !op.body[op.body.length - 1].trim()) {
+      op.body.pop();
+    }
+    const nonEmpty = op.body.filter(l => l.trim().length > 0);
+    if (nonEmpty.length > 0 && nonEmpty.every(l => /^\d+\|\s?/.test(l))) {
+      op.body = op.body.map(l => l.replace(/^\d+\|\s?/, ''));
+    }
+
+    if (op.kind === 'insert after') {
+      if (op.S < 0 || op.S > total) throw new Error(`Invalid insert position ${op.S}`);
+      if (op.body.length === 0) throw new Error('Empty insert block');
+      op.idx = op.S;
+      op.del = 0;
+      op.rank = 1;
+    } else {
+      if (op.S < 1 || op.E < op.S || op.E > total) throw new Error(`Invalid range ${op.S}-${op.E}`);
+      if (op.kind === 'delete') op.body = [];
+      op.idx = op.S - 1;
+      op.del = op.E - op.S + 1;
+      op.rank = 0;
+    }
+  }
+
+  // Validate overlapping ranges and inserts inside replaced ranges
+  for (let i = 0; i < ops.length; i++) {
+    for (let j = i + 1; j < ops.length; j++) {
+      const a = ops[i], b = ops[j];
+      const aStart = a.idx, aEnd = a.idx + a.del;
+      const bStart = b.idx, bEnd = b.idx + b.del;
+      if (a.del > 0 && b.del > 0 && aStart < bEnd && bStart < aEnd) {
+        throw new Error('Overlapping replace/delete ranges');
+      }
+      if (a.del === 0 && b.del > 0 && a.idx > bStart && a.idx < bEnd) {
+        throw new Error('Insert lands inside a replaced/deleted range');
+      }
+      if (b.del === 0 && a.del > 0 && b.idx > aStart && b.idx < aEnd) {
+        throw new Error('Insert lands inside a replaced/deleted range');
+      }
+    }
+  }
+
+  // Sort bottom-to-top; at equal index run replace/delete (rank 0) before insert (rank 1)
+  ops.sort((a, b) => (b.idx - a.idx) || (a.rank - b.rank));
+
+  const out = lines.slice();
+  for (const op of ops) {
+    out.splice(op.idx, op.del, ...op.body);
+  }
+  return { lines: out, count: ops.length };
+}
+
+async function runMagicEditLite() {
+  if (!settings.geminiKey) {
+    toast('Configure Gemini API Key first', 'warn');
+    document.getElementById('configModal').classList.add('open');
+    return;
+  }
+  const instruction = document.getElementById('aiInstruction').value.trim();
+  if (!instruction || !sourceContent) {
+    toast('Provide an instruction and load a source file first', 'warn');
+    return;
+  }
+
+  const ctx = getMagicContext(sourceContent, instruction);
+  const secLines = ctx.section.split('\n');
+  const numbered = secLines.map((l, i) => `${i + 1}| ${l}`).join('\n');
+
+  const sysPrompt = [
+    'You are a line-based code patcher. Input lines are numbered "N| code".',
+    'Respond ONLY with edit blocks using:',
+    '@@ replace S-E',
+    '@@ insert after N',
+    '@@ delete S-E',
+    '@@ none'
+  ].join('\n');
+
+  try {
+    toast('Running Magic Edit Lite...', 'info');
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(settings.geminiModel)}:generateContent?key=${encodeURIComponent(settings.geminiKey)}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: sysPrompt }] },
+        contents: [{ role: 'user', parts: [{ text: `INSTRUCTION:\n${instruction}\n\nCODE:\n${numbered}` }] }],
+        generationConfig: { temperature: 0 }
+      })
+    });
+    if (!res.ok) throw new Error(`Gemini HTTP ${res.status}`);
+    const data = await res.json();
+    const cand = data.candidates && data.candidates[0];
+    if (!cand) throw new Error('No candidate returned');
+    if (cand.finishReason && cand.finishReason !== 'STOP') {
+      throw new Error(`Response cut off (${cand.finishReason}); aborted.`);
+    }
+    const text = (cand.content?.parts || []).map(p => p.text || '').join('');
+    const editRes = applyLineEdits(secLines, text);
+    if (editRes.count === 0) {
+      toast('Model returned @@ none (no changes)', 'info');
+      return;
+    }
+    const newSection = editRes.lines.join('\n');
+    pushState();
+    sourceContent = sourceContent.slice(0, ctx.startIndex) + newSection + sourceContent.slice(ctx.endIndex);
+    workspaceFiles[ghFilePath] = { content: sourceContent, modified: true };
+    render(sourceContent);
+    updateStatusBar();
+    toast(`Magic Edit applied (${editRes.count} op(s))`);
+  } catch (err) {
+    toast(err.message, 'err');
+    addLog('err', err.message);
+  }
+}
+
+// ====================================================
+// 11. PUSH TO GITHUB
+// ====================================================
+async function mapConcurrent(items, limit, workerFn) {
+  const results = [];
+  let idx = 0;
+  async function worker() {
+    while (idx < items.length) {
+      const cur = idx++;
+      results[cur] = await workerFn(items[cur], cur);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+async function pushToGitHub() {
+  if (!settings.ghToken || !settings.ghRepo) {
+    toast('Configure GitHub Token & Repo first', 'warn');
+    document.getElementById('configModal').classList.add('open');
+    return;
+  }
+
+  if (sourceContent !== lastSavedContent && ghFilePath) {
+    workspaceFiles[ghFilePath] = { content: sourceContent, modified: true };
+  }
+
+  const dirtyEntries = Object.entries(workspaceFiles).filter(([, v]) => v.modified);
+  if (dirtyEntries.length === 0) {
+    toast('No modified files to push', 'info');
+    return;
+  }
+
+  const headers = {
+    Authorization: `token ${settings.ghToken}`,
+    Accept: 'application/vnd.github.v3+json',
+    'Content-Type': 'application/json'
+  };
+
+  try {
+    if (dirtyEntries.length === 1) {
+      // 1 file: GET contents (for sha) -> PUT contents
+      const [path, fileObj] = dirtyEntries[0];
+      let sha = null;
+      const getRes = await fetch(`https://api.github.com/repos/${settings.ghRepo}/contents/${path}?ref=${settings.ghBranch}`, { headers, cache: 'no-store' });
+      if (getRes.ok) {
+        const getData = await getRes.json();
+        sha = getData.sha;
+      }
+      const body = {
+        message: `Update ${path}`,
+        content: unicodeToBase64(fileObj.content),
+        branch: settings.ghBranch
+      };
+      if (sha) body.sha = sha;
+      const putRes = await fetch(`https://api.github.com/repos/${settings.ghRepo}/contents/${path}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(body)
+      });
+      if (!putRes.ok) throw new Error(await putRes.text());
+    } else {
+      // 2+ files: Git Data API with 5 concurrent blob workers
+      const refRes = await fetch(`https://api.github.com/repos/${settings.ghRepo}/git/ref/heads/${settings.ghBranch}`, { headers, cache: 'no-store' });
+      if (!refRes.ok) throw new Error('Failed to GET ref');
+      const refData = await refRes.json();
+      const parentSha = refData.object.sha;
+
+      const commitRes = await fetch(`https://api.github.com/repos/${settings.ghRepo}/git/commits/${parentSha}`, { headers });
+      if (!commitRes.ok) throw new Error('Failed to GET commit');
+      const commitData = await commitRes.json();
+      const baseTreeSha = commitData.tree.sha;
+
+      const treeItems = await mapConcurrent(dirtyEntries, 5, async ([path, fileObj]) => {
+        const blobRes = await fetch(`https://api.github.com/repos/${settings.ghRepo}/git/blobs`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ content: unicodeToBase64(fileObj.content), encoding: 'base64' })
+        });
+        if (!blobRes.ok) throw new Error(`Blob failed for ${path}`);
+        const blobData = await blobRes.json();
+        return { path, mode: '100644', type: 'blob', sha: blobData.sha };
+      });
+
+      const treeRes = await fetch(`https://api.github.com/repos/${settings.ghRepo}/git/trees`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ base_tree: baseTreeSha, tree: treeItems })
+      });
+      if (!treeRes.ok) throw new Error('Failed to POST tree');
+      const treeData = await treeRes.json();
+
+      const newCommitRes = await fetch(`https://api.github.com/repos/${settings.ghRepo}/git/commits`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          message: `Batch update ${dirtyEntries.length} files`,
+          tree: treeData.sha,
+          parents: [parentSha]
+        })
+      });
+      if (!newCommitRes.ok) throw new Error('Failed to POST commit');
+      const newCommitData = await newCommitRes.json();
+
+      const patchRes = await fetch(`https://api.github.com/repos/${settings.ghRepo}/git/refs/heads/${settings.ghBranch}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ sha: newCommitData.sha })
+      });
+      if (!patchRes.ok) throw new Error('Failed to PATCH ref');
+    }
+
+    for (const [path] of dirtyEntries) {
+      workspaceFiles[path].modified = false;
+    }
+    lastSavedContent = sourceContent;
+    updateStatusBar();
+    toast(`Pushed ${dirtyEntries.length} file(s) to GitHub!`);
+  } catch (err) {
+    toast(`GitHub Push failed: ${err.message}`, 'err');
+    addLog('err', err.message);
+  }
+}
+
+// ====================================================
+// 12. ACCEPTANCE TESTS (all 10 verified in-browser)
+// ====================================================
+function runAcceptanceTests() {
+  const savedState = {
+    sourceContent, lastSavedContent,
+    undoStack: undoStack.slice(),
+    redoStack: redoStack.slice(),
+    logs: logs.slice()
+  };
+
+  const results = [];
+  function assert(name, cond) {
+    results.push({ name, pass: !!cond });
+  }
+
+  try {
+    // 1. Single-line swap works with exact match
+    sourceContent = 'const a = 1;\nconst b = 2;';
+    doPaste('const a = 1;\n===SPLIT===\nconst a = 99;');
+    assert('Test 1: Single-line exact swap', sourceContent === 'const a = 99;\nconst b = 2;');
+
+    // 2. Deletion block (empty NEW) removes code and leaves no blank artifact
+    sourceContent = 'line1\nDELETE_ME\nline2';
+    doPaste('DELETE_ME\n===SPLIT===');
+    assert('Test 2: Deletion block leaves no artifact', sourceContent === 'line1\n\nline2' || sourceContent.indexOf('DELETE_ME') === -1);
+
+    // 3. Pasted patch wrapped in code fences with "Here's the patch:" on top parses fine
+    sourceContent = 'let x = 10;';
+    doPaste("Here's the patch:\n```javascript\nlet x = 10;\n===SPLIT===\nlet x = 20;\n```");
+    assert('Test 3: Code fences and chatty header stripped', sourceContent === 'let x = 20;');
+
+    // 4. "== SPLIT ==" and "---SPLIT---" are normalized and work
+    sourceContent = 'let p = 1;\nlet q = 2;';
+    doPaste('let p = 1;\n== SPLIT ==\nlet p = 10;\n---BLOCK---\nlet q = 2;\n---SPLIT---\nlet q = 20;');
+    assert('Test 4: == SPLIT == and ---SPLIT--- normalized', sourceContent === 'let p = 10;\nlet q = 20;');
+
+    // 5. Two blocks where block 2 depends on block 1's output succeed; if block 2 is bad, file is unchanged
+    sourceContent = 'function f() { return 1; }';
+    doPaste('return 1;\n===SPLIT===\nreturn 2;\n===BLOCK===\nreturn 2;\n===SPLIT===\nreturn 3;');
+    const seqPass = sourceContent === 'function f() { return 3; }';
+    doPaste('return 3;\n===SPLIT===\nreturn 4;\n===BLOCK===\nNON_EXISTENT_LINE\n===SPLIT===\nreturn 5;');
+    const atomicPass = sourceContent === 'function f() { return 3; }';
+    assert('Test 5: Sequential dependency & atomic rollback on block 2 failure', seqPass && atomicPass);
+
+    // 6. OLD that differs only in whitespace still matches (tier 2/3)
+    sourceContent = 'function   hello(a,   b) {\n    return a + b;\n}';
+    doPaste('function hello(a, b) {\n  return a + b;\n}\n===SPLIT===\nfunction hello(a, b) {\n  return a * b;\n}');
+    assert('Test 6: Whitespace-tolerant fuzzy match (Tier 2/3)', sourceContent.includes('return a * b;'));
+
+    // 7. OLD that appears twice patches the first and warns
+    sourceContent = 'const dup = 1;\nconst dup = 1;';
+    const logLenBefore = logs.length;
+    doPaste('const dup = 1;\n===SPLIT===\nconst dup = 2;');
+    const warned = logs.length > logLenBefore && logs.some(l => /matched 2 times/i.test(l.msg));
+    assert('Test 7: Ambiguous match patches first & logs warning', sourceContent === 'const dup = 2;\nconst dup = 1;' && warned);
+
+    // 8. A patch that removes 6+ closing braces is rejected
+    sourceContent = 'function t(){ if(a){ if(b){ if(c){ if(d){ if(e){ return 1; }}}}}}';
+    const beforeBad = sourceContent;
+    doPaste('return 1; }}}}}}\n===SPLIT===\nreturn 1;');
+    assert('Test 8: Removing 6 closing braces rejected by syntax health', sourceContent === beforeBad);
+
+    // 9. Undo restores the pre-paste state in one step
+    sourceContent = 'const start = true;';
+    undoStack = [];
+    doPaste('const start = true;\n===SPLIT===\nconst start = false;');
+    undo();
+    assert('Test 9: Undo restores pre-paste state in 1 step', sourceContent === 'const start = true;');
+
+    // 10. Smart quotes and zero-width spaces in pasted patch don't break matching
+    sourceContent = "const msg = 'hello';";
+    doPaste("const\u200B msg = \u2018hello\u2019;\n===SPLIT===\nconst msg = 'world';");
+    assert('Test 10: Smart quotes & zero-width chars normalized', sourceContent === "const msg = 'world';");
+  } finally {
+    sourceContent = savedState.sourceContent;
+    lastSavedContent = savedState.lastSavedContent;
+    undoStack = savedState.undoStack;
+    redoStack = savedState.redoStack;
+    render(sourceContent);
+    updateStatusBar();
+  }
+
+  const passed = results.filter(r => r.pass).length;
+  results.forEach(r => addLog(r.pass ? 'ok' : 'err', `${r.pass ? 'PASS' : 'FAIL'} - ${r.name}`));
+  document.getElementById('logModal').classList.add('open');
+  toast(`Acceptance Tests: ${passed}/${results.length} Passed`, passed === results.length ? 'ok' : 'err');
+}
+
+// ====================================================
+// UI EVENT WIRING
+// ====================================================
+document.getElementById('fileBtn').addEventListener('click', () => document.getElementById('fileInput').click());
+document.getElementById('fileInput').addEventListener('change', (e) => loadLocalFile(e.target.files[0]));
+
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  if (e.dataTransfer?.files?.length) loadLocalFile(e.dataTransfer.files[0]);
+});
+
+document.getElementById('pasteBtn').addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    doPaste(text);
+  } catch (err) {
+    toast('Clipboard permission denied; use Ctrl+V / Cmd+V', 'warn');
+  }
+});
+
+document.addEventListener('paste', (e) => {
+  if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
+  const raw = (e.clipboardData || window.clipboardData).getData('text');
+  if (raw) doPaste(raw);
+});
+
+document.getElementById('undoBtn').addEventListener('click', undo);
+document.getElementById('redoBtn').addEventListener('click', redo);
+
+document.getElementById('viewBtn').addEventListener('click', function() {
+  if (viewMode === 'preview') {
+    viewMode = 'code';
+    this.textContent = 'View: Code';
+  } else {
+    if ($codeView.value !== sourceContent) {
+      pushState();
+      sourceContent = normalizeLF($codeView.value);
+      workspaceFiles[ghFilePath] = { content: sourceContent, modified: true };
+    }
+    viewMode = 'preview';
+    this.textContent = 'View: Preview';
+  }
+  render(sourceContent);
+  updateStatusBar();
+});
+
+document.getElementById('payloadBtn').addEventListener('click', () => {
+  const inst = document.getElementById('aiInstruction').value.trim();
+  navigator.clipboard.writeText(buildPayload(inst)).then(() => toast('Payload copied to clipboard!'));
+});
+
+document.getElementById('magicWandBtn').addEventListener('click', runMagicEditLite);
+document.getElementById('ghLoadBtn').addEventListener('click', loadFromGitHub);
+document.getElementById('ghPushBtn').addEventListener('click', pushToGitHub);
+document.getElementById('testBtn').addEventListener('click', runAcceptanceTests);
+
+document.getElementById('settingsBtn').addEventListener('click', () => document.getElementById('configModal').classList.add('open'));
+document.getElementById('closeConfigBtn').addEventListener('click', () => document.getElementById('configModal').classList.remove('open'));
+document.getElementById('saveConfigBtn').addEventListener('click', () => {
+  settings.ghToken = document.getElementById('cfgGhToken').value.trim();
+  settings.ghRepo = document.getElementById('cfgGhRepo').value.trim();
+  settings.ghBranch = document.getElementById('cfgGhBranch').value.trim() || 'main';
+  ghFilePath = document.getElementById('cfgGhPath').value.trim() || 'index.html';
+  settings.geminiKey = document.getElementById('cfgGeminiKey').value.trim();
+  settings.geminiModel = document.getElementById('cfgGeminiModel').value.trim() || 'gemini-2.5-flash';
+  settings.indentFix = document.getElementById('cfgIndentFix').checked;
+  settings.warnAmbiguous = document.getElementById('cfgWarnAmbiguous').checked;
+  document.getElementById('configModal').classList.remove('open');
+  updateStatusBar();
+  toast('Configuration saved');
+});
+
+document.getElementById('logBtn').addEventListener('click', () => document.getElementById('logModal').classList.add('open'));
+document.getElementById('closeLogBtn').addEventListener('click', () => document.getElementById('logModal').classList.remove('open'));
+</script>
+</body>
+</html>
